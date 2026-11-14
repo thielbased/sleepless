@@ -1,0 +1,47 @@
+#!/bin/bash
+# Keep the Mac awake with the lid closed (pmset disablesleep) while this runs in the foreground.
+# Ends at FLOOR% battery, after an optional duration, on Ctrl+C or when the terminal closes.
+# Usage: sleepless [DURATION|off|status]   DURATION: e.g. 2h, 90m
+set -u
+FLOOR=20
+STATE="${TMPDIR:-/tmp}/sleepless.state"   # "<pid> <end epoch, 0 = none>"
+
+battery() { b=$(pmset -g batt | grep -Eo '[0-9]+%' | tr -d %); echo "${b:-100}"; }
+disable_sleep() { sudo -n /usr/bin/pmset -a disablesleep "$1"; }
+running_pid() { [ -f "$STATE" ] && pid=$(cut -d' ' -f1 "$STATE") && kill -0 "$pid" 2>/dev/null && echo "$pid"; }
+
+case "${1:-}" in
+  off)
+    pid=$(running_pid) && kill "$pid"
+    rm -f "$STATE"; disable_sleep 0 && echo "Sleepless off." ;;
+  status)
+    if pmset -g | grep -q 'SleepDisabled[[:space:]]*1'; then
+      msg="Sleepless on, battery $(battery)%, auto-off at ${FLOOR}%"
+      end=$([ -f "$STATE" ] && cut -d' ' -f2 "$STATE" || echo 0)
+      [ "$end" -gt 0 ] && msg="$msg or in $(( (end - $(date +%s)) / 60 )) min"
+      echo "$msg."
+    else
+      echo "Sleepless off, battery $(battery)%."
+    fi ;;
+  ''|*[0-9][hm])
+    end=0
+    if [ -n "${1:-}" ]; then
+      [[ $1 =~ ^([0-9]+)([hm])$ ]] || { echo "Invalid duration: $1 (use e.g. 2h or 90m)"; exit 1; }
+      unit=$([ "${BASH_REMATCH[2]}" = h ] && echo 3600 || echo 60)
+      end=$(( $(date +%s) + BASH_REMATCH[1] * unit ))
+    fi
+    pid=$(running_pid) && { echo "Sleepless already running (pid $pid). Run 'sleepless off' first."; exit 1; }
+    [ "$(battery)" -le "$FLOOR" ] && { echo "Battery at or below ${FLOOR}%, not enabling."; exit 1; }
+    disable_sleep 1 || { echo "sudo rule missing: /etc/sudoers.d/sleepless"; exit 1; }
+    echo "$$ $end" > "$STATE"
+    trap 'kill $! 2>/dev/null; rm -f "$STATE"; disable_sleep 0; echo; echo "Sleepless off."' EXIT
+    trap 'exit' INT TERM HUP
+    "$0" status
+    echo "Close this window or press Ctrl+C to stop."
+    while sleep 60 & wait $!; do
+      [ "$(battery)" -le "$FLOOR" ] && exit
+      [ "$end" -gt 0 ] && [ "$(date +%s)" -ge "$end" ] && exit
+    done ;;
+  *)
+    echo "Usage: sleepless [2h|90m|off|status]"; exit 1 ;;
+esac
